@@ -15,7 +15,7 @@
     { k: 'jousetsu', name: '常設スタッフ募集', desc: '常設スタッフ向けの募集情報です。催事専任スタッフは応募対象外です。', f: function (it) { return it.jous; } },
     { k: 'support', name: '催事スタッフ常設応援募集', desc: '催事スタッフも応募できる常設店舗の応援募集です。', f: function (it) { return it.support; } }
   ];
-  var S = { idToken: '', me: null, page: 'events', area: '', areaName: '', month: '', want: '', cache: {}, pending: {},
+  var S = { idToken: '', nid: '', me: null, page: 'events', area: '', areaName: '', month: '', want: '', cache: {}, pending: {},
     evTab: 'events', f: {}, fOpen: false, rcView: 'store', rcCat: 'saiji', rcLimit: 20, openN: {}, openD: {} };
 
   function $(id) { return document.getElementById(id); }
@@ -30,6 +30,7 @@
   }
   function loading(text) { var v = view(), c = el('div', 'card loading'); add(c, el('span', 'spin'), el('span', '', text || '読み込み中…')); add(v, c); }
   function pageOf() { var p = new URLSearchParams(location.search).get('p'); return Object.prototype.hasOwnProperty.call(PAGES, p) ? p : 'events'; }
+  function nidOf() { var x = new URLSearchParams(location.search).get('id') || ''; return /^[A-Za-z0-9_\-]{1,60}$/.test(x) ? x : ''; }   // LINEの「詳細を見る」で開くお知らせID（判定はサーバー）
 
   function ymdText(s) {   // 'YYYY-MM-DD' → 'M/D(曜)'
     var p = String(s).split('-').map(Number);
@@ -41,7 +42,7 @@
   function monthText(m) { return m ? Number(m.slice(0, 4)) + '年' + Number(m.slice(5, 7)) + '月' : ''; }
 
   /* ---------- 通信（キャッシュ・古い応答の破棄） ---------- */
-  function keyOf(op, page, area, month) { return [op, page, area || '', page === 'recruit' ? (month || '') : ''].join('|'); }
+  function keyOf(op, page, area, month) { return [op, page, area || '', page === 'recruit' ? (month || '') : '', page === 'notices' ? S.nid : ''].join('|'); }
   function fresh(k) { var x = S.cache[k]; return x && Date.now() < x.exp ? x.d : null; }
   function keep(k, d) { var age = Math.max(0, Number(d && d.age) || 0); S.cache[k] = { d: d, exp: Date.now() + FRESH_MS - age }; }
   function post(op, page, k, done) {
@@ -50,7 +51,7 @@
     var fin = function (d, ng) { var cbs = S.pending[k] || []; delete S.pending[k]; cbs.forEach(function (f) { f(d, ng); }); };
     fetch(C.API_URL, {
       method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // 単純リクエスト（事前確認なし）
-      body: JSON.stringify({ op: op, idToken: S.idToken, page: page, area: S.area, month: page === 'recruit' ? S.month : '' }),
+      body: JSON.stringify({ op: op, idToken: S.idToken, page: page, area: S.area, month: page === 'recruit' ? S.month : '', nid: page === 'notices' ? S.nid : '' }),
       credentials: 'omit', cache: 'no-store'
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok) { sessionStorage.removeItem(RETRY_KEY); keep(k, d); fin(d); return; }
@@ -421,10 +422,12 @@
 
   /* ---------- お知らせ ---------- */
   function renderNotices(d) {
-    var v = view();
-    if (!d.items || !d.items.length) return add(v, add(el('div', 'card'), el('p', 'muted', '現在、お知らせはありません。')));
-    d.items.forEach(function (n) {
-      var c = el('div', 'card'), b = el('div', 'badges');
+    var v = view(), list = d.items || [];
+    if (d.focusMissing) add(v, add(el('div', 'card'), el('p', 'ng', 'このお知らせは表示できません。'), el('p', 'muted', '掲載が終了したか、公開されていないか、あなたが対象ではない可能性があります。')));
+    if (d.focus) { S.openN[d.focus.id] = true; list = [d.focus].concat(list.filter(function (x) { return x.id !== d.focus.id; })); }   // 指定のお知らせを先頭に開いて表示
+    if (!list.length) return add(v, add(el('div', 'card'), el('p', 'muted', '現在、お知らせはありません。')));
+    list.forEach(function (n) {
+      var c = el('div', d.focus && n.id === d.focus.id ? 'card focus' : 'card'), b = el('div', 'badges');
       add(b, n.important ? el('span', 'b imp', '重要') : null, n.cat ? el('span', 'b', n.cat) : null, el('span', 'b', n.area), n.date ? el('span', 'muted', n.date) : null);
       add(c, el('div', 't', n.title), b);
       if (S.openN[n.id]) {
@@ -443,6 +446,7 @@
     liff.init({ liffId: C.LIFF_ID }).then(function () {
       if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }   // 外部ブラウザで開いた場合
       S.idToken = liff.getIDToken();
+      S.nid = nidOf();
       if (!S.idToken) { msg('LINEの認証情報を取得できませんでした。', true, 'LINEのメニューから開き直してください。'); return; }
       load(pageOf());
     }).catch(function (e) {
