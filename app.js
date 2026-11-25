@@ -1,14 +1,15 @@
 // スタッフポータル LIFF ページ
 // - LIFF 初期化後に IDトークンを取得し、本文（POST）で GAS へ送る。URL にトークン・UID・エリアを載せない。
 // - 本人・表示エリア・表示してよいデータはサーバーが毎回決める。このページは受け取った結果を表示するだけ（文字は textContent で入れる）。
-// - 取得済みデータは CACHE_MS だけ再利用（エリア・ページ・月ごとに別。サーバー側キャッシュ60秒と重なっても最大90秒程度）。
+// - 取得済みデータは「元データの読み取りから60秒」以内だけ再利用（サーバーが返す age＝元データの古さを差し引く。エリア・ページ・月ごとに別）。
+// - 催事情報は一覧と募集状況を同時に要求し、最初のタブを描いた後に他のタブを先読みする（タブ切替で待たない）。
 // - 古い通信結果は捨てる（表示中のページ・エリア・月の要求と一致したものだけ描画）。
 (function () {
   'use strict';
   var C = window.SP_CONFIG || {};
   var PAGES = { events: '催事情報', recruit: '募集シフト', notices: 'お知らせ' };
   var WD = ['日', '月', '火', '水', '木', '金', '土'];
-  var RETRY_KEY = 'sp_relogin', CACHE_MS = 30000;
+  var RETRY_KEY = 'sp_relogin', FRESH_MS = 58000;   // 元データの読み取りから（60秒−通信の余裕2秒）
   var CATS = [
     { k: 'saiji', name: '催事スタッフ募集', desc: '催事・長期催事の募集情報です。', f: function (it) { return !it.jous; } },
     { k: 'jousetsu', name: '常設スタッフ募集', desc: '常設スタッフ向けの募集情報です。催事専任スタッフは応募対象外です。', f: function (it) { return it.jous; } },
@@ -41,7 +42,8 @@
 
   /* ---------- 通信（キャッシュ・古い応答の破棄） ---------- */
   function keyOf(op, page, area, month) { return [op, page, area || '', page === 'recruit' ? (month || '') : ''].join('|'); }
-  function fresh(k) { var x = S.cache[k]; return x && Date.now() - x.t < CACHE_MS ? x.d : null; }
+  function fresh(k) { var x = S.cache[k]; return x && Date.now() < x.exp ? x.d : null; }
+  function keep(k, d) { var age = Math.max(0, Number(d && d.age) || 0); S.cache[k] = { d: d, exp: Date.now() + FRESH_MS - age }; }
   function post(op, page, k, done) {
     if (S.pending[k]) { S.pending[k].push(done); return; }   // 同じ要求を重ねない
     S.pending[k] = [done];
@@ -51,7 +53,7 @@
       body: JSON.stringify({ op: op, idToken: S.idToken, page: page, area: S.area, month: page === 'recruit' ? S.month : '' }),
       credentials: 'omit', cache: 'no-store'
     }).then(function (r) { return r.json(); }).then(function (d) {
-      if (d && d.ok) { sessionStorage.removeItem(RETRY_KEY); S.cache[k] = { d: d, t: Date.now() }; fin(d); return; }
+      if (d && d.ok) { sessionStorage.removeItem(RETRY_KEY); keep(k, d); fin(d); return; }
       if (d && d.code === 'token_expired' && !sessionStorage.getItem(RETRY_KEY)) {   // 1回だけ取り直す
         sessionStorage.setItem(RETRY_KEY, '1'); liff.logout(); liff.login({ redirectUri: location.href }); return;
       }
@@ -66,7 +68,8 @@
     if (force) delete S.cache[k];
     var c = fresh(k);
     if (c) { apply(c); return; }
-    loading(page === 'recruit' ? '募集情報を読み込み中…（数秒かかることがあります）' : '読み込み中…');
+    loading(page === 'recruit' ? '募集情報を読み込み中…' : '読み込み中…');
+    if (page === 'events') loadExtra();   // 募集状況・シフト時間も同時に要求（一覧の表示は待たせない）
     post('page', page, k, function (d, ng) {
       if (S.want !== k) return;   // 別のページ・エリア・月へ移った後の応答は描画しない
       if (ng) {
@@ -76,7 +79,27 @@
       var k2 = keyOf('page', page, d.area.id, page === 'recruit' && d.data && d.data.month ? d.data.month : S.month);
       if (k2 !== k && S.cache[k]) S.cache[k2] = S.cache[k];   // 既定のエリア・月で返ったときも、そのキーで再利用
       apply(d);
+      prefetch();
     });
+  }
+
+  /** 最初のタブを描いた後に、他のタブを先読み（1回だけ・表示中のエリア・結果はキャッシュに置くだけで描画しない）。 */
+  function prefetch() {
+    if (S.prefetched) return;
+    S.prefetched = true;
+    setTimeout(function () {
+      Object.keys(PAGES).forEach(function (p) {
+        if (p === S.page) return;
+        var k = keyOf('page', p, S.area, p === 'recruit' ? S.month : '');
+        if (fresh(k)) return;
+        post('page', p, k, function (d, ng) {
+          if (ng || !d || !d.area) return;
+          var k2 = keyOf('page', p, d.area.id, p === 'recruit' && d.data && d.data.month ? d.data.month : S.month);
+          if (k2 !== k && S.cache[k]) S.cache[k2] = S.cache[k];
+          if (p === 'events' && d.data && d.data.extra) loadExtra();
+        });
+      });
+    }, 300);
   }
 
   function apply(d) {
@@ -95,6 +118,7 @@
     S.extraErr = false;
     post('evextra', 'events', k, function (d, ng) {
       if (ng || !d || (d.data && d.data.error)) { if (d && d.data) delete S.cache[k]; S.extraErr = true; }
+      else if (d.area && S.cache[k]) S.cache[keyOf('evextra', 'events', d.area.id, '')] = S.cache[k];   // エリア未確定で要求したときも、そのエリアのキーで使う
       if (S.page === 'events' && S.cur && S.cur.page === 'events' && S.area === (d && d.area ? d.area.id : S.area)) render();
     });
   }
@@ -119,6 +143,7 @@
       x.onclick = function () {
         if (p === S.page && S.cur && S.cur.page === p) return;
         try { history.replaceState(null, '', location.pathname + '?p=' + p); } catch (e) { /* 表示には影響しない */ }
+        S.rcFocus = '';
         load(p);
         drawNav();
       };
@@ -220,12 +245,45 @@
       add(b, el('span', 'b' + (x.state === '開催中' ? ' live' : ''), x.state), el('span', 'b', x.kind || (S.evTab === 'events' ? '催事' : '常設')),
         el('span', 'b', S.areaName), ex && ex.extra ? el('span', 'b rec', '追加募集あり') : null, ex && ex.hope ? el('span', 'b hope', '希望シフト受付中') : null);
       add(c, b);
+      evApply(c, ex, X);
       var tg = el('button', 'more', S.openD[x.id] ? '詳細を閉じる ▲' : '詳細を見る ▼');
       tg.onclick = function () { S.openD[x.id] = !S.openD[x.id]; render(); };
       add(c, tg);
       if (S.openD[x.id]) add(c, detailBox(x, ex));
       add(v, c);
     });
+  }
+
+  /**
+   * 催事情報の応募導線。募集状況（evextra）の apply＝募集シフトと同じ判定結果（月・月別 Event ID・常設か・追加募集・希望受付）だけを使う。
+   * 取得前・取得失敗は何も出さない。月をまたぐ催事は月ごとにボタンを分ける（表示用の項目 id は使わない）。
+   */
+  function evApply(c, ex, X) {
+    var dx = X && X.data, ap = ex && ex.apply;
+    if (!dx || !ap || !ap.length) return;
+    var months = function (arr) { var o = {}; arr.forEach(function (a) { o[a.m] = true; }); return Object.keys(o).length; };
+    var hopes = ap.filter(function (a) { return a.h; }), extras = ap.filter(function (a) { return a.x; });
+    var mh = months(hopes) > 1, mx = months(extras) > 1, box = el('div', 'evapply');
+    if (!dx.handoff) hopes = hopes.slice(0, 1);   // 引き継ぎOFF: 従来どおりシフナビを開くだけ（月ごとに分けない）
+    hopes.forEach(function (a) {
+      var b = applyBtn({ applyUrl: dx.applyUrl, handoff: dx.handoff, month: a.m }, { k: a.j ? 'jousetsu' : 'saiji' }, { eventId: a.e }, null);
+      if (dx.handoff && mh) b.textContent += '（' + monthText(a.m) + '）';
+      add(box, b);
+    });
+    extras.forEach(function (a) {
+      var b = el('button', 'apply sub', '追加募集のシフトを確認する' + (mx ? '（' + monthText(a.m) + '）' : ''));
+      b.onclick = function () { goRecruit(a); };
+      add(box, b);
+    });
+    add(c, box);
+  }
+  /** 募集シフトへ移動（対象月・区分・店舗を選んだ状態。データは取得済みなら再利用）。 */
+  function goRecruit(a) {
+    S.month = a.m; S.rcCat = a.j ? 'jousetsu' : 'saiji'; S.rcView = 'store'; S.rcLimit = STEP; S.rcFocus = a.e;
+    try { history.replaceState(null, '', location.pathname + '?p=recruit'); } catch (e) { /* 表示には影響しない */ }
+    load('recruit');
+    drawNav();
+    try { window.scrollTo(0, 0); } catch (e) { /* 表示には影響しない */ }
   }
 
   /* ---------- 募集シフト ---------- */
@@ -275,7 +333,7 @@
     var v = view(), items = d.items || [];
     if (d.months && d.months.length > 1) {
       var ch = el('div', 'chips');
-      d.months.forEach(function (m) { var b = el('button', m === d.month ? 'on' : '', monthText(m)); b.onclick = function () { if (m === S.month) return; S.month = m; S.rcLimit = STEP; load('recruit'); }; ch.appendChild(b); });
+      d.months.forEach(function (m) { var b = el('button', m === d.month ? 'on' : '', monthText(m)); b.onclick = function () { if (m === S.month) return; S.month = m; S.rcLimit = STEP; S.rcFocus = ''; load('recruit'); }; ch.appendChild(b); });
       add(v, ch);
     }
     // 募集区分（応援募集は0件なら区分ごと出さない。取得済みのデータで判定＝取得中・失敗は0件扱いしない）
@@ -286,7 +344,7 @@
     cats.forEach(function (c) {
       var mine = items.filter(c.f), hopeN = mine.filter(function (it) { return !it.reds.length; }).length, b = el('button', c.k === S.rcCat ? 'on' : '');
       add(b, el('span', 'cn', c.name), el('span', 'cc', slots(mine) + '枠' + (hopeN ? '・受付中' + hopeN + '店舗' : '')));
-      b.onclick = function () { S.rcCat = c.k; S.rcLimit = STEP; render(); };
+      b.onclick = function () { S.rcCat = c.k; S.rcLimit = STEP; S.rcFocus = ''; render(); };
       cb.appendChild(b);
     });
     add(v, cb);
@@ -297,7 +355,13 @@
     });
     add(v, tabs);
     if (d.partial) add(v, el('p', 'muted', '一部の店舗の情報を読み込めませんでした。'));
-    var list = items.filter(cat.f);
+    var list = items.filter(cat.f), focus = S.rcFocus;
+    if (focus) {   // 催事情報から移動: 選んだ店舗を先頭に（判定は募集シフトの結果のまま）
+      var fi = list.filter(function (it) { return it.eventId === focus && it.reds.length; });
+      if (fi.length) list = fi.concat(list.filter(function (it) { return fi.indexOf(it) < 0; }));
+      add(v, el('p', 'muted focusnote', fi.length ? '催事情報から選んだ店舗を先頭に表示しています。日付・シフト区分を選んで「応募する」から進んでください。'
+        : '選んだ店舗の追加募集は、現在ありません（募集が終了した可能性があります）。'));
+    }
     if (!list.length) return add(v, add(el('div', 'card'), el('p', 'muted', monthText(d.month) + 'の' + cat.name + 'はありません。')));
     add(v, el('p', 'muted guide', d.handoff
       ? '【追加募集あり】公開済み店舗シフトの空き枠です。\n【希望シフト受付中】シフト確定前の希望受付です。\n応募はシフナビから行えます。'
@@ -306,7 +370,7 @@
     if (S.rcView === 'store') {
       list.slice(0, lim).forEach(function (it) {
         if (!it.reds.length) return add(v, hopeCard(it, d, cat));
-        var c = el('div', 'card');
+        var c = el('div', 'card' + (focus && it.eventId === focus ? ' focus' : ''));
         add(c, el('div', 't', it.brand), el('div', 's', it.store), add(el('div', 'badges'), el('span', 'b', it.jous ? '常設' : (it.kind || '催事')), el('span', 'b rec', '追加募集あり'), el('span', 'b', it.reds.length + '枠'),
           it.hope ? el('span', 'b hope', '希望シフト受付中') : null));
         it.reds.forEach(function (s) { add(c, slotRow(dayText(d.month, s.d) + '　' + s.label, s.time, d, cat, it, s)); });
