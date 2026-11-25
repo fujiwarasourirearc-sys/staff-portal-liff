@@ -15,7 +15,7 @@
     { k: 'support', name: '催事スタッフ常設応援募集', desc: '催事スタッフも応募できる常設店舗の応援募集です。', f: function (it) { return it.support; } }
   ];
   var S = { idToken: '', me: null, page: 'events', area: '', areaName: '', month: '', want: '', cache: {}, pending: {},
-    evTab: 'events', evMonth: '', evState: '', rcView: 'store', rcCat: 'saiji', rcLimit: 20, openN: {}, openD: {} };
+    evTab: 'events', f: {}, fOpen: false, rcView: 'store', rcCat: 'saiji', rcLimit: 20, openN: {}, openD: {} };
 
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
@@ -105,7 +105,7 @@
     if (S.me.role === 'hq' && S.me.areas.length > 1) {   // 本部だけ（許可エリアの中から。最終判定はサーバー）
       var sel = el('select');
       S.me.areas.forEach(function (x) { var o = el('option', '', x.name); o.value = x.id; if (x.id === S.area) o.selected = true; sel.appendChild(o); });
-      sel.onchange = function () { S.area = sel.value; S.month = ''; S.evMonth = ''; load(S.page); };
+      sel.onchange = function () { S.area = sel.value; S.month = ''; S.f = {}; load(S.page); };   // エリアを変えたら検索条件も消す（他エリアの候補を残さない）
       add(a, el('span', '', '表示エリア '), sel);
     } else {
       a.textContent = '所属エリア：' + S.areaName;
@@ -164,27 +164,55 @@
     var tabs = el('div', 'tabs');
     [['events', '催事・長期催事', d.events.length], ['jousetsu', '常設店舗', d.jousetsu.length]].forEach(function (t) {
       var b = el('button', S.evTab === t[0] ? 'on' : '', t[1] + '（' + t[2] + '）');
-      b.onclick = function () { S.evTab = t[0]; render(); };
+      b.onclick = function () { S.evTab = t[0]; S.f.brand = ''; S.f.store = ''; render(); };   // 候補が変わるのでブランド・店舗だけ戻す
       tabs.appendChild(b);
     });
     add(v, tabs);
-    var f = el('div', 'filters'), ms = el('select'), ss = el('select');
-    var o0 = el('option', '', 'すべての月'); o0.value = ''; ms.appendChild(o0);
-    monthsOf(list).forEach(function (m) { var o = el('option', '', monthText(m)); o.value = m; if (m === S.evMonth) o.selected = true; ms.appendChild(o); });
-    [['', '開催中・開催予定'], ['開催中', '開催中'], ['開催予定', '開催予定']].forEach(function (x) { var o = el('option', '', x[1]); o.value = x[0]; if (x[0] === S.evState) o.selected = true; ss.appendChild(o); });
-    ms.onchange = function () { S.evMonth = ms.value; render(); };
-    ss.onchange = function () { S.evState = ss.value; render(); };
-    add(f, ms, ss); add(v, f);
+    // 検索・絞り込み（取得済みの公開データだけで行う＝GASへ通信しない。候補も表示中のエリア・公開分だけから作る）
+    var F = S.f, recReady = !!map, uniq = function (k) { var o = {}; list.forEach(function (x) { if (x[k]) o[x[k]] = true; }); return Object.keys(o).sort(); };
+    var active = ['brand', 'store', 'date', 'state', 'month', 'rec'].filter(function (k) { return F[k]; }).length;
+    var shown = list.filter(function (x) {
+      if (F.brand && x.brand !== F.brand) return false;
+      if (F.store && x.store !== F.store) return false;
+      if (F.date && !(x.start <= F.date && F.date <= x.end)) return false;   // 開始日・終了日も含む
+      if (F.state && x.state !== F.state) return false;
+      if (F.month && !(x.start.slice(0, 7) <= F.month && F.month <= x.end.slice(0, 7))) return false;
+      if (F.rec && recReady) { var ex0 = map[x.id]; if (!ex0 || !(ex0.extra || ex0.hope)) return false; }
+      return true;
+    });
+    var tg0 = el('button', 'searchbtn' + (active ? ' on' : ''), (S.fOpen ? '▲ ' : '▼ ') + '検索・絞り込み' + (active ? '（' + active + '件の条件）' : ''));
+    tg0.onclick = function () { S.fOpen = !S.fOpen; render(); };
+    add(v, tg0);
+    if (S.fOpen) {
+      var p = el('div', 'card search');
+      var sel = function (label, key, opts) {
+        var w = el('label', 'fld'), s = el('select');
+        add(w, el('span', '', label));
+        opts.forEach(function (x) { var o = el('option', '', x[1]); o.value = x[0]; if (x[0] === (F[key] || '')) o.selected = true; s.appendChild(o); });
+        s.onchange = function () { F[key] = s.value; render(); };
+        return add(w, s);
+      };
+      add(p, sel('メーカー・ブランド', 'brand', [['', 'すべて']].concat(uniq('brand').map(function (b) { return [b, b]; }))));
+      add(p, sel('館・店舗', 'store', [['', 'すべて']].concat(uniq('store').map(function (b) { return [b, b]; }))));
+      var dw = el('label', 'fld'), di = el('input');
+      di.type = 'date'; di.value = F.date || '';
+      di.onchange = function () { F.date = di.value; render(); };
+      add(p, add(dw, el('span', '', '開催日'), di));
+      add(p, sel('開催月', 'month', [['', 'すべての月']].concat(monthsOf(list).map(function (m) { return [m, monthText(m)]; }))));
+      add(p, sel('開催状態', 'state', [['', 'すべて'], ['開催中', '開催中'], ['開催予定', '開催予定']]));
+      add(p, sel('募集状況', 'rec', [['', 'すべて'], ['1', '募集中のみ']]));
+      if (F.rec && !recReady) add(p, el('p', 'muted', S.extraErr ? '募集状況を取得できなかったため、「募集中のみ」は適用していません。' : '募集状況を確認中です。確認後に「募集中のみ」を適用します。'));
+      var cl = el('button', 'sub', '条件をクリア');
+      cl.onclick = function () { S.f = {}; render(); };
+      add(p, cl);
+      add(v, p);
+    }
     if (d.extra && !map) {
       if (S.extraErr) { var r = el('p', 'muted', '募集状況・シフト時間を取得できませんでした。'); var rb = el('button', 'sub', '再取得'); rb.onclick = function () { S.extraErr = false; render(); loadExtra(true); }; add(v, add(r, rb)); }
       else add(v, add(el('p', 'muted loading'), el('span', 'spin'), el('span', '', '募集状況・シフト時間を確認中…')));
     }
-    var shown = list.filter(function (x) {
-      if (S.evState && x.state !== S.evState) return false;
-      if (S.evMonth && !(x.start.slice(0, 7) <= S.evMonth && S.evMonth <= x.end.slice(0, 7))) return false;
-      return true;
-    });
-    if (!shown.length) return add(v, add(el('div', 'card'), el('p', 'muted', '該当する情報はありません。')));
+    add(v, el('p', 'muted count', shown.length + '件' + (active ? '（全' + list.length + '件中）' : '')));
+    if (!shown.length) return add(v, add(el('div', 'card'), el('p', 'muted', active ? '条件に該当する催事はありません。' : '該当する情報はありません。')));
     shown.forEach(function (x) {
       var ex = map ? map[x.id] : null, c = el('div', 'card');
       add(c, el('div', 't', x.brand), el('div', 's', x.store), el('div', 's muted', ymdText(x.start) + ' 〜 ' + ymdText(x.end)));
@@ -201,20 +229,31 @@
   }
 
   /* ---------- 募集シフト ---------- */
-  function applyBtn(url, cat) {
-    var b = el('button', 'apply', 'シフナビで確認する');
+  /**
+   * シフナビへのボタン。d.handoff（管理DB ③基本設定 SHIFNAVI_HANDOFF・シフナビ側の公開後にON）のときだけ、店舗・日程を引き継ぐ。
+   * URL に入れるのは 種別・月・Event ID・区分（催事/常設）・日・シフト区分だけ（個人情報・トークンは入れない）。応募できるかはシフナビが判定する。
+   */
+  function applyBtn(d, cat, it, s) {
+    var url = d.applyUrl, ho = !!(d.handoff && url && it && it.eventId);
+    var b = el('button', 'apply', ho ? (s ? '応募する' : '希望シフトを提出する') : 'シフナビで確認する');
     b.onclick = function () {
       if (!url) return;
       var who = cat.k === 'jousetsu' ? '\n※常設スタッフ向けの募集です。催事専任スタッフは応募対象外です。' : '';
-      if (!window.confirm('シフナビを開きます。\n店舗・日付・区分は自動では選択されません。シフナビでログイン後、「募集中のシフトに応募する」から選んでください。\n応募できるかどうかはシフナビで確認されます。' + who)) return;
-      liff.openWindow({ url: url, external: false });
+      var go = url;
+      if (ho) {
+        var q = { ap: s ? 'red' : 'hope', am: d.month, ae: it.eventId, as: cat.k === 'jousetsu' ? '常設' : '催事' };
+        if (s) { q.ad = String(s.d); q.al = s.label; }
+        go = url + (url.indexOf('?') >= 0 ? '&' : '?') + Object.keys(q).map(function (k) { return k + '=' + encodeURIComponent(q[k]); }).join('&');
+        if (!window.confirm('シフナビを開きます。\nログイン後、' + (s ? '選んだ店舗・日程・シフト区分' : '選んだ店舗') + 'が選択された状態で表示されます。内容を確認して提出してください。\n応募できるかどうかはシフナビで確認されます。' + who)) return;
+      } else if (!window.confirm('シフナビを開きます。\n店舗・日付・区分は自動では選択されません。シフナビでログイン後、「募集中のシフトに応募する」から選んでください。\n応募できるかどうかはシフナビで確認されます。' + who)) return;
+      liff.openWindow({ url: go, external: false });
     };
     return b;
   }
-  function slotRow(text, sub, url, cat) {
+  function slotRow(text, sub, d, cat, it, s) {
     var r = el('div', 'slot'), w = el('div', 'w');
     add(w, el('div', '', text), sub ? el('div', 'muted', sub) : null);
-    return add(r, w, applyBtn(url, cat));
+    return add(r, w, applyBtn(d, cat, it, s));
   }
   function slots(items) { return items.reduce(function (s, it) { return s + it.reds.length; }, 0); }
   var STEP = 20;   // 一度に描くカード数（「さらに表示」で増やす）
@@ -225,11 +264,11 @@
     add(v, b);
   }
   /** 日程未確定（店舗シフト未公開・赤セルなし）の募集概要。架空の日程は作らない。 */
-  function hopeCard(it, url, cat) {
+  function hopeCard(it, d, cat) {
     var c = el('div', 'card');
     add(c, el('div', 't', it.brand), el('div', 's', it.store), add(el('div', 'badges'), el('span', 'b', it.jous ? '常設' : (it.kind || '催事')), el('span', 'b hope', '希望シフト受付中')));
     add(c, el('p', 'muted', it.shiftOpen ? '現在、追加募集の空き枠はありません。希望シフトはシフナビで受け付けています。' : '店舗シフト作成中のため、具体的な空き枠はまだ公開されていません。'));
-    var r = el('div', 'slot'); add(r, el('div', 'w'), applyBtn(url, cat)); add(c, r);
+    var r = el('div', 'slot'); add(r, el('div', 'w'), applyBtn(d, cat, it, null)); add(c, r);
     return c;
   }
   function renderRecruit(d) {
@@ -260,15 +299,17 @@
     if (d.partial) add(v, el('p', 'muted', '一部の店舗の情報を読み込めませんでした。'));
     var list = items.filter(cat.f);
     if (!list.length) return add(v, add(el('div', 'card'), el('p', 'muted', monthText(d.month) + 'の' + cat.name + 'はありません。')));
-    add(v, el('p', 'muted', '【追加募集あり】は公開済みの店舗シフトの空き枠、【希望シフト受付中】は日程未確定の希望受付です。店舗・日付・区分の自動選択は準備中のため、シフナビで選んでください。'));
+    add(v, el('p', 'muted guide', d.handoff
+      ? '【追加募集あり】公開済み店舗シフトの空き枠です。\n【希望シフト受付中】シフト確定前の希望受付です。\n応募はシフナビから行えます。'
+      : '【追加募集あり】は公開済みの店舗シフトの空き枠、【希望シフト受付中】は日程未確定の希望受付です。店舗・日付・区分の自動選択は準備中のため、シフナビで選んでください。'));
     var lim = S.rcLimit || STEP, tm = function (s) { return [s.label, s.time].filter(Boolean).join('　'); };
     if (S.rcView === 'store') {
       list.slice(0, lim).forEach(function (it) {
-        if (!it.reds.length) return add(v, hopeCard(it, d.applyUrl, cat));
+        if (!it.reds.length) return add(v, hopeCard(it, d, cat));
         var c = el('div', 'card');
         add(c, el('div', 't', it.brand), el('div', 's', it.store), add(el('div', 'badges'), el('span', 'b', it.jous ? '常設' : (it.kind || '催事')), el('span', 'b rec', '追加募集あり'), el('span', 'b', it.reds.length + '枠'),
           it.hope ? el('span', 'b hope', '希望シフト受付中') : null));
-        it.reds.forEach(function (s) { add(c, slotRow(dayText(d.month, s.d) + '　' + s.label, s.time, d.applyUrl, cat)); });
+        it.reds.forEach(function (s) { add(c, slotRow(dayText(d.month, s.d) + '　' + s.label, s.time, d, cat, it, s)); });
         add(v, c);
       });
       return more(v, list.length - lim);
@@ -280,14 +321,14 @@
     days.slice(0, lim).forEach(function (day) {
       add(v, el('div', 'day', dayText(d.month, day) + '（' + byDay[day].length + '枠）'));
       var c = el('div', 'card');
-      byDay[day].forEach(function (x) { add(c, slotRow(x.it.brand + '　' + x.it.store, tm(x.s), d.applyUrl, cat)); });
+      byDay[day].forEach(function (x) { add(c, slotRow(x.it.brand + '　' + x.it.store, tm(x.s), d, cat, x.it, x.s)); });
       add(v, c);
     });
     more(v, days.length - lim);
     var hopes = list.filter(function (it) { return !it.reds.length; });
     if (hopes.length) {   // 日程未確定の募集は別枠（見落とさないように）
       add(v, el('div', 'day', '日程未確定の募集（希望シフト受付中・' + hopes.length + '店舗）'));
-      hopes.forEach(function (it) { add(v, hopeCard(it, d.applyUrl, cat)); });
+      hopes.forEach(function (it) { add(v, hopeCard(it, d, cat)); });
     }
   }
 
