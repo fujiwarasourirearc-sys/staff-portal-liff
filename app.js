@@ -243,7 +243,9 @@
       add(c, el('div', 't', x.brand), el('div', 's', x.store), el('div', 's muted', ymdText(x.start) + ' 〜 ' + ymdText(x.end)));
       var b = el('div', 'badges');
       add(b, el('span', 'b' + (x.state === '開催中' ? ' live' : ''), x.state), el('span', 'b', x.kind || (S.evTab === 'events' ? '催事' : '常設')),
-        el('span', 'b', S.areaName), ex && ex.extra ? el('span', 'b rec', '追加募集あり') : null, ex && ex.hope ? el('span', 'b hope', '希望シフト受付中') : null);
+        el('span', 'b', S.areaName), ex && ex.extra ? el('span', 'b rec', '追加募集あり') : null,
+        ex && (ex.apply ? ex.apply.some(function (a) { return a.h && !a.f; }) : ex.hope) ? el('span', 'b hope', '希望シフト受付中') : null,
+        ex && (ex.apply || []).some(function (a) { return a.f; }) ? el('span', 'b fill', FILLED_HEAD) : null);   // 充足済みの月だけの希望受付は「受付中」バッジにしない
       add(c, b);
       evApply(c, ex, X);
       var tg = el('button', 'more', S.openD[x.id] ? '詳細を閉じる ▲' : '詳細を見る ▼');
@@ -254,26 +256,44 @@
     });
   }
 
+  /** 募集状況の表示（催事情報・募集シフトで共通の文言）。充足（D列）を最優先。 */
+  var FILLED_HEAD = '✓ シフト充足済み';
+  var FILLED_MSG = '現在、必要なスタッフ数を満たしているため、追加募集は行っておりません。今後、欠員が発生した際に追加募集を行う場合があります。';
+  var NOT_OPEN = '現在募集しておりません';
+  function stateText(x, h, s) { return x && h ? '追加募集あり・希望シフト受付中' : x ? '追加募集あり' : h ? (s ? '希望シフト受付中' : 'シフト作成中・希望シフト受付中') : NOT_OPEN; }
+  /** 希望提出ボタン（既存 applyBtn）。充足済みは控えめな枠線ボタン・「（充足済み）」。 */
+  function hopeBtn(d, cat, it, filled) {
+    var b = applyBtn(d, cat, it, null);
+    if (filled) { b.className = 'apply sub'; if (d.handoff && d.applyUrl) b.textContent = '希望シフトを提出する（充足済み）'; }
+    return b;
+  }
+
   /**
-   * 催事情報の応募導線。募集状況（evextra）の apply＝募集シフトと同じ判定結果（月・月別 Event ID・常設か・追加募集・希望受付）だけを使う。
-   * 取得前・取得失敗は何も出さない。月をまたぐ催事は月ごとにボタンを分ける（表示用の項目 id は使わない）。
+   * 催事情報の募集状況と応募導線。募集状況（evextra）の apply＝募集シフトと同じ判定結果（月・月別 Event ID・常設か・追加募集・希望受付・D充足・E公開）だけを使う。
+   * 取得前・取得失敗は何も出さない。月ごとに判定・表示する（月をまたぐ催事で、ある月の充足を別の月に広げない。表示用の項目 id は使わない）。
    */
   function evApply(c, ex, X) {
-    var dx = X && X.data, ap = ex && ex.apply;
-    if (!dx || !ap || !ap.length) return;
-    var months = function (arr) { var o = {}; arr.forEach(function (a) { o[a.m] = true; }); return Object.keys(o).length; };
-    var hopes = ap.filter(function (a) { return a.h; }), extras = ap.filter(function (a) { return a.x; });
-    var mh = months(hopes) > 1, mx = months(extras) > 1, box = el('div', 'evapply');
-    if (!dx.handoff) hopes = hopes.slice(0, 1);   // 引き継ぎOFF: 従来どおりシフナビを開くだけ（月ごとに分けない）
-    hopes.forEach(function (a) {
-      var b = applyBtn({ applyUrl: dx.applyUrl, handoff: dx.handoff, month: a.m }, { k: a.j ? 'jousetsu' : 'saiji' }, { eventId: a.e }, null);
-      if (dx.handoff && mh) b.textContent += '（' + monthText(a.m) + '）';
-      add(box, b);
-    });
-    extras.forEach(function (a) {
-      var b = el('button', 'apply sub', '追加募集のシフトを確認する' + (mx ? '（' + monthText(a.m) + '）' : ''));
-      b.onclick = function () { goRecruit(a); };
-      add(box, b);
+    var dx = X && X.data;
+    if (!dx || !ex || !ex.apply) return;   // 判定結果が無い応答では何も言わない
+    var ap = ex.apply || [], box = el('div', 'evapply');
+    if (!ap.length) { add(box, el('div', 'st muted', NOT_OPEN)); return add(c, box); }
+    var ms = {}; ap.forEach(function (a) { ms[a.m] = true; });
+    var multi = Object.keys(ms).length > 1, xMulti = Object.keys(ap.filter(function (a) { return a.x; }).reduce(function (o, a) { o[a.m] = 1; return o; }, {})).length > 1, hopeN = 0;
+    ap.forEach(function (a) {
+      var blk = el('div', 'apblk' + (a.f ? ' filled' : '')), mt = multi ? monthText(a.m) + '：' : '';
+      if (a.f) add(blk, el('div', 'fh', mt + FILLED_HEAD), el('p', 'muted', FILLED_MSG));
+      else add(blk, el('div', 'st', mt + stateText(a.x, a.h, a.s)));
+      if (a.h && (dx.handoff || !hopeN++)) {   // 引き継ぎOFF: 従来どおりシフナビを開くだけ（1つ）
+        var b = hopeBtn({ applyUrl: dx.applyUrl, handoff: dx.handoff, month: a.m }, { k: a.j ? 'jousetsu' : 'saiji' }, { eventId: a.e }, a.f);
+        if (!a.f && dx.handoff && multi) b.textContent += '（' + monthText(a.m) + '）';
+        add(blk, b);
+      }
+      if (a.x) {
+        var xb = el('button', 'apply sub', '追加募集のシフトを確認する' + (xMulti ? '（' + monthText(a.m) + '）' : ''));
+        xb.onclick = function () { goRecruit(a); };
+        add(blk, xb);
+      }
+      add(box, blk);
     });
     add(c, box);
   }
@@ -324,9 +344,12 @@
   /** 日程未確定（店舗シフト未公開・赤セルなし）の募集概要。架空の日程は作らない。 */
   function hopeCard(it, d, cat) {
     var c = el('div', 'card');
-    add(c, el('div', 't', it.brand), el('div', 's', it.store), add(el('div', 'badges'), el('span', 'b', it.jous ? '常設' : (it.kind || '催事')), el('span', 'b hope', '希望シフト受付中')));
-    add(c, el('p', 'muted', it.shiftOpen ? '現在、追加募集の空き枠はありません。希望シフトはシフナビで受け付けています。' : '店舗シフト作成中のため、具体的な空き枠はまだ公開されていません。'));
-    var r = el('div', 'slot'); add(r, el('div', 'w'), applyBtn(d, cat, it, null)); add(c, r);
+    var f = !!it.filled;   // D「シフト充足」（その月の一覧）を最優先
+    add(c, el('div', 't', it.brand), el('div', 's', it.store), add(el('div', 'badges'), el('span', 'b', it.jous ? '常設' : (it.kind || '催事')),
+      f ? el('span', 'b fill', FILLED_HEAD) : el('span', 'b hope', stateText(false, true, it.shiftOpen))));
+    if (f) add(c, el('div', 'fh', FILLED_HEAD), el('p', 'muted', FILLED_MSG));
+    else add(c, el('p', 'muted', it.shiftOpen ? '現在、追加募集の空き枠はありません。希望シフトはシフナビで受け付けています。' : '店舗シフト作成中のため、具体的な空き枠はまだ公開されていません。'));
+    var r = el('div', 'slot'); add(r, el('div', 'w'), hopeBtn(d, cat, it, f)); add(c, r);
     return c;
   }
   function renderRecruit(d) {
